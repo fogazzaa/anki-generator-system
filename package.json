@@ -1,0 +1,27 @@
+{
+  "name": "anki-generator-system",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node main/index.js",
+    "check": "node -e \"import('./main/utils/checkEnv.js').then(m => m.checkEnv())\""
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.0.0",
+    "fflate": "^0.8.2",
+    "fs-extra": "^11.2.0",
+    "glob": "^11.0.0",
+    "mammoth": "^1.8.0",
+    "p-queue": "^8.0.1",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^4.0.0",
+    "read-excel-file": "^9.0.6",
+    "sharp": "^0.33.0",
+    "tesseract.js": "^5.1.1",
+    "tiktoken": "^1.0.17",
+    "xml2js": "^0.6.2",
+    "youtube-transcript": "^1.2.1"
+  }
+}
