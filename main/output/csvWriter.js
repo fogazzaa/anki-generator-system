@@ -1,10 +1,89 @@
-// Escreve flashcards em CSV com deduplicacao por pergunta.
 import fs from "fs";
 import path from "path";
 import { sanitizeName } from "../utils/sanitizeName.js";
 import { reportData } from "../utils/report.js";
 
-function parseSafeJson(text) {
+export async function writeFlashcards(geminiResponseText, sourceFileName) {
+  try {
+    const contentDir = process.env.CONTENTDIR ?? "./content";
+    const parsedData = parseResponseJson(geminiResponseText);
+    if (parsedData === null) {
+      console.log(`[OUTPUT] ERRO: resposta não é JSON válido. Arquivo: ${sourceFileName}`);
+      return 0;
+    }
+
+    const assuntos = Array.isArray(parsedData) ? parsedData : [parsedData];
+    let totalCardsNovos = 0;
+    const fallbackAssunto = sanitizeName(path.basename(sourceFileName, path.extname(sourceFileName)));
+
+    for (const elemento of assuntos) {
+      if (!elemento || typeof elemento.caminho !== "string" || !Array.isArray(elemento.cards)) {
+        console.log("[OUTPUT] AVISO: assunto ignorado por schema inválido.");
+        continue;
+      }
+
+      const assuntoRaw = typeof elemento.assunto === "string" ? elemento.assunto : "";
+      const assuntoNormalizado = assuntoRaw.trim() ? assuntoRaw : fallbackAssunto;
+      const nomeBase = sanitizeName(assuntoNormalizado);
+      const caminhoNormalizado = normalizeCaminho(elemento.caminho);
+      const pastaDestino = path.join(contentDir, caminhoNormalizado);
+      fs.mkdirSync(pastaDestino, { recursive: true });
+
+      const tagCaminhoRaw = typeof elemento.tagCaminho === "string" ? elemento.tagCaminho : "";
+      const tagCaminho = tagCaminhoRaw.trim()
+        ? tagCaminhoRaw
+        : `main::${caminhoNormalizado.replace(/^content\//, "").replace(/\//g, "::")}`;
+
+      const cardsByTipo = {
+        basic: elemento.cards.filter((card) => card?.tipo === "basic"),
+        "basic-reversed": elemento.cards.filter((card) => card?.tipo === "basic-reversed"),
+        cloze: elemento.cards.filter((card) => card?.tipo === "cloze"),
+        "type-answer": elemento.cards.filter((card) => card?.tipo === "type-answer"),
+      };
+
+      const tiposPresentes = [];
+      for (const card of elemento.cards) {
+        const tipo = card?.tipo;
+        if (cardsByTipo[tipo]?.length > 0 && !tiposPresentes.includes(tipo)) {
+          tiposPresentes.push(tipo);
+        }
+      }
+      const tiposSelecionados = tiposPresentes.slice(0, 2);
+      const tiposIgnorados = tiposPresentes.slice(2);
+      if (tiposIgnorados.length > 0) {
+        console.log(`[OUTPUT] AVISO: tipos excedentes ignorados (${tiposIgnorados.join(", ")}).`);
+      }
+
+      for (const tipo of tiposSelecionados) {
+        const cardsTipo = cardsByTipo[tipo];
+        const sufixo = getSufixoTipo(tipo);
+        const nomeArquivo = path.join(pastaDestino, `${nomeBase}${sufixo}.csv`);
+        totalCardsNovos += writeCards(cardsTipo, nomeArquivo, pastaDestino, tagCaminho, tipo);
+      }
+    }
+
+    return totalCardsNovos;
+  } catch (error) {
+    console.log(`[OUTPUT] ERRO ao escrever CSV (${sourceFileName}): ${error.message}`);
+    return 0;
+  }
+}
+
+function normalizeCaminho(caminho) {
+  const raw = String(caminho ?? "").trim().replace(/\\/g, "/");
+  const semPrefixo = raw.replace(/^\.?\/?content\/?/i, "");
+  return semPrefixo || "";
+}
+
+function getSufixoTipo(tipo) {
+  if (tipo === "basic") return "B";
+  if (tipo === "basic-reversed") return "R";
+  if (tipo === "cloze") return "C";
+  if (tipo === "type-answer") return "T";
+  return "B";
+}
+
+function parseResponseJson(text) {
   try {
     return JSON.parse(text);
   } catch {
@@ -17,98 +96,83 @@ function parseSafeJson(text) {
   }
 }
 
-function normalizeOutputPath(rawPath) {
-  const normalized = String(rawPath ?? "").trim().replace(/\\/g, "/");
-  const withoutLeadingSlash = normalized.replace(/^\/+/, "");
-  const withoutContentPrefix = withoutLeadingSlash.replace(/^\.?\/?content\/?/i, "");
-  return withoutContentPrefix;
-}
-
-export async function writeFlashcards(geminiResponseText, sourceFileName) {
+function writeCards(cards, nomeArquivo, pastaDestino, tagCaminho, tipoNoteType) {
   try {
-    const parsed = parseSafeJson(geminiResponseText);
-    if (parsed === null) {
-      console.log(`[OUTPUT] ERRO: resposta não é JSON válido. Arquivo fonte: ${sourceFileName}`);
+    fs.mkdirSync(pastaDestino, { recursive: true });
+
+    const arquivoExiste = fs.existsSync(nomeArquivo);
+    const existentes = new Set();
+
+    if (arquivoExiste) {
+      const conteudoExistente = fs.readFileSync(nomeArquivo, "utf-8");
+      const linhas = conteudoExistente.split(/\r?\n/).filter((linha) => linha.trim());
+
+      for (const linha of linhas) {
+        if (linha.startsWith("tags: ")) continue;
+        const chave = linha.split(";")[0]?.trim();
+        if (chave) {
+          existentes.add(chave);
+        }
+      }
+    }
+
+    const cardsNovos = [];
+    for (const card of cards) {
+      const chaveCard =
+        tipoNoteType === "cloze"
+          ? String(card?.texto ?? "").trim()
+          : String(card?.pergunta ?? "").trim();
+
+      if (!chaveCard) {
+        continue;
+      }
+      if (existentes.has(chaveCard)) {
+        reportData.duplicatasIgnoradas += 1;
+        continue;
+      }
+
+      existentes.add(chaveCard);
+      cardsNovos.push(card);
+    }
+
+    if (cardsNovos.length === 0) {
       return 0;
     }
 
-    const entries = Array.isArray(parsed) ? parsed : [parsed];
-    let totalNewLines = 0;
-
-    for (const item of entries) {
-      if (
-        !item ||
-        typeof item.assunto !== "string" ||
-        typeof item.caminho !== "string" ||
-        !Array.isArray(item.dados) ||
-        item.dados.length < 5
-      ) {
-        console.log("[OUTPUT] AVISO: objeto ignorado por schema inválido.");
-        continue;
+    const linhasCards = cardsNovos.map((card) => {
+      if (tipoNoteType === "cloze") {
+        return `${String(card?.texto ?? "").trim()};${String(card?.extra ?? "").trim()}`;
       }
 
-      const fallbackName = sanitizeName(path.basename(sourceFileName, path.extname(sourceFileName)));
-      const assunto = item.assunto.trim() ? item.assunto : fallbackName;
-      const fileName = sanitizeName(assunto);
-      const contentDir = process.env.CONTENTDIR ?? "./content";
-      const normalizedPath = normalizeOutputPath(item.caminho);
-      const destinationFolder = path.join(contentDir, normalizedPath);
-      fs.mkdirSync(destinationFolder, { recursive: true });
-
-      const targetFile = path.join(destinationFolder, `${fileName}.csv`);
-      const existingQuestions = new Set();
-
-      if (fs.existsSync(targetFile)) {
-        const previous = fs.readFileSync(targetFile, "utf-8");
-        const lines = previous
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .filter((line) => line.trim() !== "Pergunta;Resposta");
-        for (const line of lines) {
-          const question = line.split(";")[0]?.trim();
-          if (question) {
-            existingQuestions.add(question);
-          }
-        }
+      if (tipoNoteType === "type-answer") {
+        return `${String(card?.pergunta ?? "").trim()};${String(card?.resposta ?? "").trim()};${String(
+          card?.dica ?? "",
+        ).trim()}`;
       }
 
-      const newLines = [];
-      for (const row of item.dados) {
-        if (typeof row !== "string" || !row.includes(";")) {
-          continue;
-        }
-        const question = row.split(";")[0].trim();
-        if (!question) {
-          continue;
-        }
-        if (existingQuestions.has(question)) {
-          reportData.duplicatasIgnoradas += 1;
-          continue;
-        }
-        existingQuestions.add(question);
-        newLines.push(row);
+      if (card?.tipo === "basic-reversed") {
+        return `${String(card?.pergunta ?? "").trim()};${String(card?.resposta ?? "").trim()};${String(
+          card?.dica ?? "",
+        ).trim()};${String(card?.inverter ?? "y").trim()}`;
       }
 
-      if (newLines.length === 0) {
-        console.log(`[OUTPUT] 0 flashcard(s) novo(s) em: ${targetFile}`);
-        continue;
-      }
+      return `${String(card?.pergunta ?? "").trim()};${String(card?.resposta ?? "").trim()};${String(
+        card?.dica ?? "",
+      ).trim()};`;
+    });
 
-      const payload = `${newLines.join("\n")}\n`;
-      if (!fs.existsSync(targetFile)) {
-        fs.writeFileSync(targetFile, payload, "utf-8");
-      } else {
-        fs.appendFileSync(targetFile, payload, "utf-8");
-      }
-
-      reportData.flashcardsNovos += newLines.length;
-      totalNewLines += newLines.length;
-      console.log(`[OUTPUT] ${newLines.length} flashcard(s) novo(s) em: ${targetFile}`);
+    if (!arquivoExiste) {
+      const conteudoNovo = [`tags: ${tagCaminho}`, ...linhasCards].join("\n");
+      fs.writeFileSync(nomeArquivo, conteudoNovo, "utf-8");
+    } else {
+      fs.appendFileSync(nomeArquivo, `\n${linhasCards.join("\n")}`, "utf-8");
     }
 
-    return totalNewLines;
+    reportData.flashcardsNovos += linhasCards.length;
+    console.log(`[OUTPUT] ${linhasCards.length} card(s) ${tipoNoteType} novo(s) em: ${nomeArquivo}`);
+    return linhasCards.length;
   } catch (error) {
-    console.log(`[OUTPUT] ERRO ao escrever CSV (${sourceFileName}): ${error.message}`);
+    console.log(`[OUTPUT] ERRO ao escrever arquivo ${nomeArquivo}: ${error.message}`);
     return 0;
   }
 }

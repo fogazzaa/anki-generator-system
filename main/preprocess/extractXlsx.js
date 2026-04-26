@@ -1,13 +1,14 @@
 // Extrai dados de planilhas e converte para texto estruturado.
-import readXlsxFile, { readSheetNames } from "read-excel-file/node";
+import readXlsxFile from "read-excel-file/node";
 
 export async function extractXlsx(filePath) {
   try {
-    const sheetNames = await readSheetNames(filePath);
+    const sheets = await readXlsxFile(filePath);
     const blocks = [];
 
-    for (const sheetName of sheetNames) {
-      const rows = await readXlsxFile(filePath, { sheet: sheetName });
+    for (const sheetData of sheets) {
+      const sheetName = sheetData?.sheet ?? "Sheet";
+      const rows = Array.isArray(sheetData?.data) ? sheetData.data : [];
       const textRows = rows.map((row) => row.map((value, index) => `coluna${index + 1}: ${value ?? ""}`).join(" | "));
       blocks.push(`\n\n--- Sheet: ${sheetName} ---\n${textRows.join("\n")}`);
     }

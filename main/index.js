@@ -15,7 +15,7 @@ import { extractXlsx } from "./preprocess/extractXlsx.js";
 import { extractImage } from "./preprocess/extractImage.js";
 import { extractYoutube } from "./preprocess/extractYoutube.js";
 import { createBatches } from "./batcher/createBatches.js";
-import { callGemini, apiQueue } from "./api/geminiClient.js";
+import { callGemini } from "./api/geminiClient.js";
 import { buildFlashcardPrompt } from "./prompts/flashcardPrompt.js";
 import { writeFlashcards } from "./output/csvWriter.js";
 
@@ -44,7 +44,6 @@ async function dispatchExtractor(filePath) {
 }
 
 async function main() {
-  const queuePromises = [];
   try {
     checkEnv();
   } catch (error) {
@@ -89,39 +88,30 @@ async function main() {
     reportData.erros.push(`Falha no loteamento: ${error.message}`);
   }
 
-  let folderTree = "";
-  try {
-    folderTree = getFolderTree(path.resolve(process.env.CONTENTDIR ?? "./content"));
-  } catch (error) {
-    reportData.erros.push(`Falha ao montar árvore: ${error.message}`);
-  }
-
   try {
     for (let i = 0; i < batches.length; i += 1) {
-      const batch = batches[i];
-      const textBatch = batch.map((item) => `\n\n---ARQUIVO: ${item.fileName}---\n\n${item.text}`).join("");
-      const sourceFileName = batch[0]?.fileName ?? "arquivoDesconhecido.txt";
-      const prompt = buildFlashcardPrompt(textBatch, folderTree, sourceFileName);
-      console.log(`[INDEX] Enviando lote ${i + 1}/${batches.length}...`);
+      try {
+        const lote = batches[i];
+        const textoLote = lote
+          .map((item) => `\n\n---ARQUIVO: ${item.fileName}---\n\n${item.text}`)
+          .join("");
+        const sourceFileName = path.basename(lote[0]?.fileName ?? "arquivoDesconhecido.txt");
+        const contentDir = path.resolve(process.env.CONTENTDIR ?? "./content");
+        const arvore = getFolderTree(contentDir);
+        const prompt = buildFlashcardPrompt(textoLote, arvore, sourceFileName);
 
-      const taskPromise = (async () => {
-        try {
-          const response = await callGemini(prompt);
-          await writeFlashcards(response, sourceFileName);
-          reportData.blocosEnviados += 1;
-        } catch (error) {
-          reportData.erros.push(`Erro no lote ${i + 1}: ${error.message}`);
-        }
-      })();
-
-      queuePromises.push(taskPromise);
+        console.log(`[INDEX] Enviando lote ${i + 1}/${batches.length}...`);
+        const resposta = await callGemini(prompt);
+        await writeFlashcards(resposta, sourceFileName);
+        reportData.blocosEnviados += 1;
+      } catch (error) {
+        reportData.erros.push(`Erro no lote ${i + 1}: ${error.message}`);
+      }
     }
   } catch (error) {
     reportData.erros.push(`Falha no envio dos lotes: ${error.message}`);
   }
 
-  await Promise.allSettled(queuePromises);
-  await apiQueue.onIdle();
   printReport();
 }
 
